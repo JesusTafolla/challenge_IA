@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Assistant - OpenAI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .chat-container::-webkit-scrollbar { width: 4px; }
+        .chat-container::-webkit-scrollbar-thumb { background-color: #4a5568; border-radius: 20px; }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+</head>
+<body class="bg-gray-900 text-white">
+
+    <div class="flex h-screen">
+        <!-- Left Panel: Configuration -->
+        <div class="w-1/3 bg-gray-800 p-6 flex flex-col border-r border-gray-700 overflow-y-auto">
+            <h1 class="text-3xl font-bold text-cyan-400 mb-6">AI Assistant</h1>
+
+            <div class="mb-6">
+                 <h2 class="text-xl font-semibold text-gray-300 mb-4">Core AI Setup</h2>
+                <div class="mb-4">
+                    <label class="block text-sm font-medium text-gray-400 mb-2" for="api-key">OpenAI API Key</label>
+                    <input id="api-key" type="password" class="w-full p-2 bg-gray-700 border border-gray-600 rounded-md" placeholder="Enter your OpenAI API Key">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-400 mb-2" for="file-upload">Upload Knowledge Base (.txt)</label>
+                    <input id="file-upload" type="file" accept=".txt" class="w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:font-semibold file:bg-cyan-500 file:text-white hover:file:bg-cyan-600">
+                    <p id="file-status" class="text-xs text-gray-500 mt-2"></p>
+                </div>
+            </div>
+
+            <div class="mt-auto pt-6 border-t border-gray-700 space-y-6">
+                <!-- N8N AUTOMATION TOOL SECTION -->
+                <div>
+                    <h2 class="text-xl font-semibold text-gray-300 mb-4">✨ Automation Tool (n8n)</h2>
+                    <p class="text-xs text-gray-500 mb-3">Use by typing: <code class="bg-gray-700 p-1 rounded">automate: your instruction</code></p>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-400 mb-2" for="n8n-webhook">n8n Webhook URL</label>
+                        <input id="n8n-webhook" type="text" class="w-full p-2 bg-gray-700 border border-gray-600 rounded-md" placeholder="Enter your n8n webhook URL">
+                    </div>
+                </div>
+
+                <!-- STRAPI DIRECT INTEGRATION TOOL SECTION -->
+                <div>
+                    <h2 class="text-xl font-semibold text-gray-300 mb-4">Direct Tool (Strapi)</h2>
+                    <p class="text-xs text-gray-500 mb-3">Use by typing: <code class="bg-gray-700 p-1 rounded">save note: your content</code></p>
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium text-gray-400 mb-2" for="strapi-url">Strapi API URL</label>
+                        <input id="strapi-url" type="text" class="w-full p-2 bg-gray-700 border border-gray-600 rounded-md" placeholder="http://localhost:1337/api/notes">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-400 mb-2" for="strapi-token">Strapi API Token</label>
+                        <input id="strapi-token" type="password" class="w-full p-2 bg-gray-700 border border-gray-600 rounded-md" placeholder="Enter Strapi API Token">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Panel: Chat Interface -->
+        <div class="w-2/3 flex flex-col">
+            <div id="chat-container" class="flex-1 p-6 overflow-y-auto chat-container">
+                <div id="message-list" class="space-y-4"></div>
+            </div>
+            <div class="p-6 bg-gray-800 border-t border-gray-700">
+                <div class="flex items-center space-x-4">
+                    <input id="chat-input" type="text" placeholder="Ask a question or use a tool..." class="flex-1 p-3 bg-gray-700 border border-gray-600 rounded-md focus:ring-2 focus:ring-cyan-500 focus:outline-none" disabled>
+                    <button id="send-button" class="px-6 py-3 bg-cyan-600 rounded-md font-semibold hover:bg-cyan-700 disabled:bg-gray-600 disabled:cursor-not-allowed" disabled>Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const fileUpload = document.getElementById('file-upload');
+            const fileStatus = document.getElementById('file-status');
+            const chatInput = document.getElementById('chat-input');
+            const sendButton = document.getElementById('send-button');
+            const messageList = document.getElementById('message-list');
+            const chatContainer = document.getElementById('chat-container');
+            const apiKeyInput = document.getElementById('api-key');
+            const n8nWebhookInput = document.getElementById('n8n-webhook');
+            const strapiUrlInput = document.getElementById('strapi-url');
+            const strapiTokenInput = document.getElementById('strapi-token');
+            
+            const API_URL = 'http://127.0.0.1:5001';
+            let isLoading = false;
+
+            function addMessage(sender, text) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `flex ${sender === 'user' ? 'justify-end' : 'justify-start'}`;
+                messageDiv.innerHTML = `<div class="max-w-lg px-4 py-2 rounded-lg ${sender === 'user' ? 'bg-cyan-600' : 'bg-gray-700'}"><p class="whitespace-pre-wrap">${text}</p></div>`;
+                messageList.appendChild(messageDiv);
+                chatContainer.scrollTop = chatContainer.scrollHeight;
+            }
+
+            function setLoading(state) {
+                isLoading = state;
+                chatInput.disabled = state;
+                sendButton.disabled = state || !chatInput.value.trim();
+            }
+
+            fileUpload.addEventListener('change', async (event) => {
+                const file = event.target.files[0];
+                if (!file) return;
+                setLoading(true);
+                fileStatus.textContent = `Processing ${file.name}...`;
+                const formData = new FormData();
+                formData.append('file', file);
+                try {
+                    const response = await fetch(`${API_URL}/upload`, { method: 'POST', body: formData });
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.error);
+                    fileStatus.textContent = `Loaded: ${file.name}`;
+                    addMessage('system', `Knowledge base created. Ready for questions.`);
+                    chatInput.disabled = false;
+                } catch (error) {
+                    addMessage('system', `Error: ${error.message}`);
+                } finally {
+                    setLoading(false);
+                }
+            });
+            
+            async function handleSendMessage() {
+                const query = chatInput.value.trim();
+                const lowerCaseQuery = query.toLowerCase();
+                if (!query || isLoading) return;
+                setLoading(true);
+                addMessage('user', query); // Show original casing to user
+                chatInput.value = '';
+                
+                try {
+                    let endpoint = '/chat';
+                    let payload = { 
+                        query: query, 
+                        api_key: apiKeyInput.value,
+                        provider: 'openai' // Hardcoded to use OpenAI
+                    };
+
+                    if (lowerCaseQuery.startsWith('automate:')) {
+                        endpoint = '/automate';
+                        payload = {
+                            instruction: query.substring(9).trim(),
+                            n8n_webhook: n8nWebhookInput.value,
+                        };
+                    } else if (lowerCaseQuery.startsWith('save note:')) {
+                        endpoint = '/save-note';
+                        payload = {
+                            content: query.substring(10).trim(),
+                            strapi_url: strapiUrlInput.value,
+                            strapi_token: strapiTokenInput.value,
+                        };
+                    }
+
+                    const response = await fetch(`${API_URL}${endpoint}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.error);
+                    addMessage('assistant', data.response || data.message);
+                } catch (error) {
+                     addMessage('assistant', `Error: ${error.message}`);
+                } finally {
+                    setLoading(false);
+                }
+            }
+
+            sendButton.addEventListener('click', handleSendMessage);
+            chatInput.addEventListener('keypress', (e) => e.key === 'Enter' && handleSendMessage());
+            chatInput.addEventListener('input', () => sendButton.disabled = isLoading || !chatInput.value.trim());
+        });
+    </script>
+</body>
+</html>

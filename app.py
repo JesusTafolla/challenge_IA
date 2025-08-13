@@ -2,7 +2,8 @@
 import numpy as np
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
-import openai # Import the openai library
+import openai
+import anthropic
 import requests
 import os # Import the os library to read environment variables
 
@@ -11,9 +12,9 @@ app = Flask(__name__)
 CORS(app) 
 
 # --- In-Memory Data Stores ---
-knowledge_base = { "chunks": [], "embeddings": [], "file_name": None }
+knowledge_base = { "chunks": [], "embeddings": {}, "file_name": None }
 
-# --- Helper Functions for RAG ---
+# --- Helper Functions ---
 def chunk_text(text, chunk_size=500, overlap=50):
     """Splits text into smaller, overlapping chunks."""
     chunks = []
@@ -22,7 +23,7 @@ def chunk_text(text, chunk_size=500, overlap=50):
     return chunks
 
 def get_embedding(text, api_key):
-    """Generates a vector embedding for a given text using OpenAI's API."""
+    """Generates embeddings using OpenAI's model."""
     client = openai.OpenAI(api_key=api_key)
     response = client.embeddings.create(input=text, model="text-embedding-3-small")
     return response.data[0].embedding
@@ -35,7 +36,6 @@ def cosine_similarity(vec_a, vec_b):
 @app.route('/')
 def index():
     """Serves the main frontend file."""
-    # Ensure your frontend HTML file is named 'index.html' in the 'templates' folder
     return render_template('index.html') 
 
 @app.route('/upload', methods=['POST'])
@@ -48,37 +48,56 @@ def upload_file():
         text = file.read().decode('utf-8')
         chunks = chunk_text(text)
         global knowledge_base
-        knowledge_base = { "chunks": chunks, "embeddings": [], "file_name": file.filename }
+        knowledge_base = { "chunks": chunks, "embeddings": {}, "file_name": file.filename }
         return jsonify({ "message": f"File '{file.filename}' processed. {len(chunks)} chunks created." })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/chat', methods=['POST'])
 def chat():
-    """Main RAG endpoint for answering questions using OpenAI."""
+    """Main RAG endpoint, supporting OpenAI and Claude."""
     data = request.json
-    
-    # AWS DEPLOYMENT CHANGE: Prioritize environment variables for the API key
-    api_key = os.environ.get('OPENAI_API_KEY') or data.get('api_key')
-    
     query = data.get('query')
-    if not query or not api_key: return jsonify({"error": "Query and API Key are required."}), 400
+    provider = data.get('provider', 'openai')
+    
+    # --- AWS DEPLOYMENT CHANGE ---
+    # This logic first checks for environment variables set in AWS.
+    # If it's running locally and they don't exist, it uses the key from the UI.
+    openai_api_key = os.environ.get('OPENAI_API_KEY') or data.get('api_key')
+    claude_api_key = os.environ.get('CLAUDE_API_KEY') or data.get('api_key')
+    
+    # Use the correct key for the selected provider
+    llm_api_key = claude_api_key if provider == 'claude' else openai_api_key
+
+    if not all([query, llm_api_key, provider]): return jsonify({"error": "Query, API Key, and Provider are required."}), 400
     if not knowledge_base["chunks"]: return jsonify({"error": "Please upload a knowledge file first."}), 400
     
     try:
+        # Embeddings are always created with OpenAI for consistency
         if not knowledge_base["embeddings"]:
-            knowledge_base["embeddings"] = [get_embedding(chunk, api_key) for chunk in knowledge_base["chunks"]]
+            knowledge_base["embeddings"] = [get_embedding(chunk, openai_api_key) for chunk in knowledge_base["chunks"]]
         
-        query_embedding = get_embedding(query, api_key)
+        query_embedding = get_embedding(query, openai_api_key)
         similarities = [cosine_similarity(query_embedding, emb) for emb in knowledge_base["embeddings"]]
         top_indices = np.argsort(similarities)[-3:][::-1]
         context = "\n\n---\n\n".join([knowledge_base["chunks"][i] for i in top_indices])
 
         prompt = f"Based ONLY on the following context, answer the question.\n\nContext:\n{context}\n\nQuestion: {query}\n\nAnswer:"
         
-        client = openai.OpenAI(api_key=api_key)
-        response = client.chat.completions.create(model="gpt-4", messages=[{"role": "system", "content": prompt}])
-        final_response = response.choices[0].message.content
+        if provider == 'claude':
+            client = anthropic.Anthropic(api_key=llm_api_key)
+            response = client.messages.create(
+                model="claude-3-opus-20240229",
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            final_response = response.content[0].text
+        elif provider == 'openai':
+            client = openai.OpenAI(api_key=llm_api_key)
+            response = client.chat.completions.create(model="gpt-4", messages=[{"role": "system", "content": prompt}])
+            final_response = response.choices[0].message.content
+        else:
+            raise ValueError("Unsupported provider")
 
         return jsonify({"response": final_response})
     except Exception as e:
@@ -89,10 +108,10 @@ def automate():
     """Custom Tool: Triggers an n8n workflow for complex automations."""
     data = request.json
     instruction = data.get('instruction')
-
-    # AWS DEPLOYMENT CHANGE: Prioritize environment variables for the webhook URL
+    
+    # --- AWS DEPLOYMENT CHANGE ---
     n8n_webhook = os.environ.get('N8N_WEBHOOK_URL') or data.get('n8n_webhook')
-
+    
     if not all([instruction, n8n_webhook]): return jsonify({"error": "Instruction and n8n Webhook URL are required."}), 400
     payload = {'instruction': instruction}
     try:
@@ -108,38 +127,22 @@ def save_note():
     """Custom Tool: Saves a note directly to a Strapi CMS."""
     data = request.json
     note_content = data.get('content')
-    
-    # AWS DEPLOYMENT CHANGE: Prioritize environment variables for Strapi credentials
+
+    # --- AWS DEPLOYMENT CHANGE ---
     strapi_url = os.environ.get('STRAPI_URL') or data.get('strapi_url')
     strapi_token = os.environ.get('STRAPI_TOKEN') or data.get('strapi_token')
 
-    if not all([note_content, strapi_url, strapi_token]):
-        return jsonify({"error": "Content, Strapi URL, and Strapi Token are required."}), 400
-
-    headers = {
-        'Authorization': f'Bearer {strapi_token}',
-        'Content-Type': 'application/json'
-    }
-    
-    payload = {
-        'data': {
-            'content': note_content
-        }
-    }
-
+    if not all([note_content, strapi_url, strapi_token]): return jsonify({"error": "Content, Strapi URL, and Strapi Token are required."}), 400
+    headers = {'Authorization': f'Bearer {strapi_token}', 'Content-Type': 'application/json'}
+    payload = {'data': {'content': note_content}}
     try:
         response = requests.post(strapi_url, headers=headers, json=payload)
         response.raise_for_status() 
-        
         response_data = response.json()
         strapi_id = response_data.get('data', {}).get('id')
-        
-        return jsonify({
-            "response": f"Note saved successfully to Strapi with ID: {strapi_id}"
-        })
+        return jsonify({"response": f"Note saved successfully to Strapi with ID: {strapi_id}"})
     except requests.exceptions.RequestException as e:
         return jsonify({"error": f"Failed to save note to Strapi: {e}"}), 500
 
 if __name__ == '__main__':
     app.run(debug=True, port=5001)
-    
